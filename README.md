@@ -1,17 +1,23 @@
-# 🕌 ceramah
+# 🕌 ngaji
 
 > YouTube audio player untuk terminal — dengarkan ceramah & podcast tanpa buka browser.
 
-[![PyPI version](https://img.shields.io/pypi/v/ceramah)](https://pypi.org/project/ceramah)
+[![PyPI version](https://img.shields.io/pypi/v/ngaji)](https://pypi.org/project/ngaji)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 ```
-╭─ Now Playing ──────────────────────────────────────╮
-│ ▶  Memutar                                         │
-│ Ceramah Ust. Firanda - Keutamaan Tauhid            │
-│ Firanda Andirja Official  ·  1:08:42               │
-│ Posisi: 0:31:05   🔊 80%                           │
-╰────────────────────────────────────────────────────╯
+╭──────────── Now Playing ─────────────╮
+│ ▶  Memutar  ♥                        │
+│                                      │
+│ Ceramah Ust. Firanda - Tauhid        │
+│ Firanda Andirja Official             │
+│                                      │
+│ ████████████░░░░░░░░  31:05 / 1:08   │
+│                                      │
+│ 🔊 80%                               │
+╰──────────────────────────────────────╯
+  [Spasi] pause  [←→] prev/next
+  [+/-] vol  [l] suka  [Esc] kembali
 ```
 
 ---
@@ -35,20 +41,20 @@ sudo apt install ffmpeg
 sudo pacman -S ffmpeg
 ```
 
-> `ffmpeg` sudah include `ffplay` yang digunakan ceramah untuk streaming audio.
+> `ffmpeg` sudah include `ffplay` yang digunakan ngaji untuk streaming audio.
 > Alternatif: `brew install mpv` jika sudah punya atau prefer mpv.
 
-### 2. Install ceramah
+### 2. Install ngaji
 
 **Via Homebrew (macOS):**
 ```bash
-brew tap rezaafaisal/ceramah
-brew install ceramah
+brew tap rezaafaisal/ngaji
+brew install ngaji
 ```
 
 **Via pip:**
 ```bash
-pip install ceramah
+pip install ngaji
 ```
 
 ---
@@ -56,39 +62,50 @@ pip install ceramah
 ## Penggunaan
 
 ```bash
-ceramah
+ngaji
 ```
 
 ### Perintah
 
+Ketik `/` di prompt untuk melihat daftar perintah dengan autocomplete (seperti Claude Code).
+
 | Perintah | Fungsi |
 |---|---|
-| `search <kata>` | Cari video/ceramah di YouTube |
-| `play <nomor>` | Mainkan dari hasil search |
-| `add <nomor>` | Tambah ke queue (tanpa langsung main) |
-| `queue` | Lihat antrian |
-| `next` / `n` | Track berikutnya |
-| `prev` / `p` | Track sebelumnya |
-| `pause` | Pause / Resume |
-| `goto <nomor>` | Loncat ke nomor di queue |
-| `remove <nomor>` | Hapus dari queue |
-| `volume <0-100>` | Atur volume |
-| `vol+` / `vol-` | Volume naik/turun 10 |
-| `clear` | Kosongkan queue |
-| `status` | Now playing & queue |
-| `quit` / `q` | Keluar |
+| `/search` | Cari ceramah di YouTube (halaman interaktif) |
+| `/np` | Now Playing — layar player dengan kontrol keyboard |
+| `/queue` | Lihat & kelola antrian (↑↓ navigasi, Enter putar, d hapus) |
+| `/likes` | Daftar ceramah yang di-like |
+| `/history` | Riwayat ceramah terakhir |
+| `/playlists` | Lihat & kelola playlist |
+| `/pause` | Pause / Resume |
+| `/next` | Track berikutnya |
+| `/prev` | Track sebelumnya |
+| `/volume <0-100>` | Atur volume |
+| `/vol+` / `/vol-` | Volume naik/turun 10 |
+| `/like` | Like / unlike track sekarang |
+| `/help` | Bantuan |
+| `/quit` | Keluar (posisi tersimpan otomatis) |
+
+### Navigasi
+
+Setiap perintah membuka **halaman interaktif** — tekan `Esc` untuk kembali ke prompt.
+
+- **Hasil pencarian & likes**: `↑↓` pilih, `Enter` putar, `a` tambah ke queue
+- **Queue**: `↑↓` pilih, `Enter` putar, `d` hapus, `c` kosongkan
+- **Player**: `Spasi` pause, `←→` prev/next, `+/-` volume, `l` like
+- **Playlist**: `↑↓` pilih, `Enter` lihat isi, `p` putar, `n` buat baru, `d` hapus
 
 ### Contoh sesi
 
 ```
-ceramah> search firanda tauhid
-ceramah> play 1
-ceramah> search firanda sifat shalat nabi
-ceramah> add 2
-ceramah> queue
-ceramah> pause
-ceramah> volume 70
-ceramah> quit
+ngaji> /search firanda tauhid
+  🔍 pilih dengan ↑↓, Enter untuk putar
+
+ngaji> /np
+  ▶ layar player interaktif (Esc kembali)
+
+ngaji> /queue
+  📋 kelola antrian (Esc kembali)
 ```
 
 ---
@@ -97,9 +114,12 @@ ceramah> quit
 
 - 🔍 **Search YouTube** langsung dari terminal
 - ▶️ **Streaming audio** — tidak download, langsung putar
+- 🎮 **Interactive TUI** — navigasi dengan arrow keys, setiap perintah adalah halaman
+- ⌨️ **Slash commands** — ketik `/` untuk autocomplete perintah (seperti Claude Code)
 - 📋 **Queue** — susun beberapa ceramah sekaligus
 - ⏭️ **Auto-next** — otomatis lanjut ke track berikutnya
-- 💾 **Resume otomatis** — keluar di tengah ceramah, buka lagi dilanjutkan dari posisi terakhir
+- 💾 **Resume otomatis** — keluar di tengah ceramah, lanjutkan dari posisi terakhir
+- ♥️ **Likes & Playlist** — simpan ceramah favorit, buat playlist
 - 🔊 **Volume control**
 
 ---

@@ -1,9 +1,9 @@
-class Ceramah < Formula
+class Ngaji < Formula
   include Language::Python::Virtualenv
 
   desc "YouTube audio player untuk terminal — dengarkan ceramah tanpa buka browser"
-  homepage "https://github.com/rezaafaisal/ceramah"
-  url "https://files.pythonhosted.org/packages/source/c/ceramah/ceramah-0.1.0.tar.gz"
+  homepage "https://github.com/rezaafaisal/ngaji"
+  url "https://files.pythonhosted.org/packages/source/n/ngaji/ngaji-0.1.0.tar.gz"
   # Ganti sha256 di bawah setelah upload ke PyPI:
   # jalankan: curl -sL <url> | sha256sum
   sha256 "GANTI_DENGAN_SHA256_SETELAH_UPLOAD_KE_PYPI"
@@ -27,6 +27,6 @@ class Ceramah < Formula
   end
 
   test do
-    assert_match "ceramah", shell_output("#{bin}/ceramah --help 2>&1", 1)
+    assert_match "ngaji", shell_output("#{bin}/ngaji --help 2>&1", 1)
   end
 end

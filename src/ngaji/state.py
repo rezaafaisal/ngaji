@@ -1,4 +1,4 @@
-"""State persistence — queue, posisi, volume disimpan di ~/.ceramah_state.json"""
+"""State persistence — queue, posisi, volume disimpan di ~/.ngaji_state.json"""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
 
-STATE_FILE = Path.home() / ".ceramah_state.json"
+STATE_FILE = Path.home() / ".ngaji_state.json"
 
 
 @dataclass

@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "ceramah"
+name = "ngaji"
 version = "0.1.0"
 description = "YouTube audio player untuk terminal — dengarkan ceramah tanpa buka browser"
 readme = "README.md"
@@ -12,7 +12,7 @@ license = { text = "MIT" }
 authors = [
   { name = "rezaafaisal", email = "rezaafaisal@users.noreply.github.com" }
 ]
-keywords = ["youtube", "audio", "cli", "terminal", "podcast", "ceramah"]
+keywords = ["youtube", "audio", "cli", "terminal", "podcast", "ngaji", "ceramah"]
 classifiers = [
   "Environment :: Console",
   "License :: OSI Approved :: MIT License",
@@ -22,15 +22,16 @@ classifiers = [
 dependencies = [
   "yt-dlp>=2024.1.0",
   "rich>=13.0.0",
+  "prompt_toolkit>=3.0.0",
 ]
 
 [project.scripts]
-ceramah = "ceramah.cli:main"
+ngaji = "ngaji.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/rezaafaisal/ceramah"
-Repository = "https://github.com/rezaafaisal/ceramah"
-Issues = "https://github.com/rezaafaisal/ceramah/issues"
+Homepage = "https://github.com/rezaafaisal/ngaji"
+Repository = "https://github.com/rezaafaisal/ngaji"
+Issues = "https://github.com/rezaafaisal/ngaji/issues"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/ceramah"]
+packages = ["src/ngaji"]

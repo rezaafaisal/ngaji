@@ -1,4 +1,4 @@
-"""Database SQLite untuk history, likes, dan playlist (~/.ceramah.db)."""
+"""Database SQLite untuk history, likes, dan playlist (~/.ngaji.db)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
-DB_FILE = Path.home() / ".ceramah.db"
+DB_FILE = Path.home() / ".ngaji.db"
 
 
 @contextmanager
