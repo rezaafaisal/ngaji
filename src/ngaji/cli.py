@@ -1,11 +1,12 @@
 """Main CLI — entry point untuk command `ngaji`.
 
-Page-based TUI: setiap perintah buka halaman interaktif (Esc = kembali).
+REPL sederhana: setiap perintah print hasilnya sekali, input via prompt biasa.
 Ketik / di prompt untuk daftar perintah dengan autocomplete.
 """
 
 from __future__ import annotations
 
+import contextlib
 import select
 import sys
 import termios
@@ -39,7 +40,7 @@ console = Console()
 # ── Slash commands untuk autocomplete ──────────────────────────────────────────
 _SLASH_CMDS: list[tuple[str, str, bool]] = [
     ("search",    "Cari ceramah di YouTube",                True),
-    ("np",        "Now playing — layar player interaktif",  False),
+    ("np",        "Now playing — status sekarang",          False),
     ("queue",     "Lihat & kelola antrian",                 False),
     ("likes",     "Daftar ceramah yang di-like",            False),
     ("history",   "Riwayat ceramah terakhir",               False),
@@ -93,29 +94,36 @@ def _parse_duration(s: str) -> float:
     return 0.0
 
 
-def _getch(timeout: float = 0.4) -> Optional[str]:
-    """Baca satu keypress tanpa echo. None jika timeout.
-    Arrow: '\\x1b[A' (up) '\\x1b[B' (down) '\\x1b[C' (right) '\\x1b[D' (left)."""
+def _read_key(timeout: float = 0.5) -> Optional[str]:
+    """Baca satu keypress — terminal harus sudah dalam cbreak mode.
+    Arrow: '\\x1b[A' up · '\\x1b[B' down · '\\x1b[C' right · '\\x1b[D' left."""
+    ready, _, _ = select.select([sys.stdin], [], [], timeout)
+    if not ready:
+        return None
+    ch = sys.stdin.read(1)
+    if ch == "\x1b":
+        r2, _, _ = select.select([sys.stdin], [], [], 0.05)
+        if r2:
+            ch2 = sys.stdin.read(1)
+            if ch2 == "[":
+                r3, _, _ = select.select([sys.stdin], [], [], 0.05)
+                if r3:
+                    ch3 = sys.stdin.read(1)
+                    return "\x1b[" + ch3
+            return "\x1b" + ch2
+        return "\x1b"
+    return ch
+
+
+@contextlib.contextmanager
+def _page_mode():
+    """Cbreak mode untuk sesi navigasi: echo OFF, input char-by-char, output normal.
+    Mencegah karakter tombol bocor ke terminal selama rendering."""
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
+    tty.setcbreak(fd)
     try:
-        tty.setraw(fd)
-        ready, _, _ = select.select([sys.stdin], [], [], timeout)
-        if not ready:
-            return None
-        ch = sys.stdin.read(1)
-        if ch == "\x1b":
-            r2, _, _ = select.select([sys.stdin], [], [], 0.05)
-            if r2:
-                ch2 = sys.stdin.read(1)
-                if ch2 == "[":
-                    r3, _, _ = select.select([sys.stdin], [], [], 0.05)
-                    if r3:
-                        ch3 = sys.stdin.read(1)
-                        return "\x1b[" + ch3
-                return "\x1b" + ch2
-            return "\x1b"
-        return ch
+        yield
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
@@ -130,6 +138,7 @@ class NgajiApp:
         self._running = True
         self._search_results: list[Track] = []
         self._watcher: Optional[threading.Thread] = None
+        self._watcher_gen = 0
         self._auto_next_flag = threading.Event()
         self._session = PromptSession(
             completer=_SlashCompleter(),
@@ -146,7 +155,6 @@ class NgajiApp:
         )
 
     def _mini_status(self) -> str:
-        """One-line now playing info."""
         track = self.state.current_track()
         if not track:
             return ""
@@ -172,7 +180,6 @@ class NgajiApp:
         )
 
     def _consume_auto_next(self) -> None:
-        """Consume auto-next flag: advance ke track berikutnya (background)."""
         if self._auto_next_flag.is_set():
             self._auto_next_flag.clear()
             nxt = self.state.current_track()
@@ -195,13 +202,15 @@ class NgajiApp:
         return True
 
     def _start_watcher(self) -> None:
-        if self._watcher and self._watcher.is_alive():
-            return
         self._auto_next_flag.clear()
+        self._watcher_gen += 1
+        gen = self._watcher_gen
 
         def _watch() -> None:
             while self._running:
                 time.sleep(1)
+                if self._watcher_gen != gen:
+                    break
                 if self.player.is_finished:
                     nxt = self.state.next_track()
                     if nxt:
@@ -211,623 +220,373 @@ class NgajiApp:
         self._watcher = threading.Thread(target=_watch, daemon=True)
         self._watcher.start()
 
-    # ── Page: Search ──────────────────────────────────────────────────────────
+    # ── Pages ─────────────────────────────────────────────────────────────────
 
     def _page_search(self, query: str = "") -> None:
-        # Input query jika belum ada
-        if not query:
-            console.clear()
-            console.print(self._header())
-            status = self._mini_status()
-            if status:
-                console.print(status)
-            console.print("\n  [bold cyan]🔍 Pencarian[/bold cyan]\n")
-            try:
-                query = self._session.prompt("  Kata kunci: ").strip()
-            except (EOFError, KeyboardInterrupt):
-                return
+        while True:  # outer loop: cari lagi dengan '/' tanpa rekursi
+            # Input query — di luar _page_mode agar prompt_toolkit berjalan normal
             if not query:
-                return
-
-        # Cari
-        console.clear()
-        console.print(self._header())
-        console.print(f"\n  [yellow]Mencari: {query}...[/yellow]")
-
-        try:
-            self._search_results = search(query)
-        except Exception as e:
-            console.print(f"\n  [red]Error: {e}[/red]")
-            console.print("  [dim]Tekan tombol apa saja...[/dim]")
-            _getch(3.0)
-            return
-
-        if not self._search_results:
-            console.print("\n  [red]Tidak ada hasil.[/red]")
-            console.print("  [dim]Tekan tombol apa saja...[/dim]")
-            _getch(3.0)
-            return
-
-        # Tampilkan hasil + navigasi
-        cursor = 0
-        items = self._search_results
-        msg = ""
-
-        while True:
-            self._consume_auto_next()
-            console.clear()
-            console.print(self._header())
-            status = self._mini_status()
-            if status:
-                console.print(status)
-
-            t = Table(
-                title=f'🔍 "{query}"',
-                border_style="cyan", show_lines=False, expand=False,
-            )
-            t.add_column("", width=2)
-            t.add_column("#", style="dim", width=3)
-            t.add_column("Judul", max_width=50)
-            t.add_column("Channel", style="dim", max_width=22)
-            t.add_column("Durasi", style="cyan", width=8)
-
-            for i, tr in enumerate(items):
-                sel = i == cursor
-                t.add_row(
-                    "[bold green]>[/bold green]" if sel else " ",
-                    str(i + 1),
-                    Text(tr.title[:50], style="bold green" if sel else ""),
-                    Text(tr.channel[:22], style="cyan" if sel else "dim"),
-                    tr.duration,
-                )
-            console.print(t)
-
-            if msg:
-                console.print(f"  {msg}")
-                msg = ""
-            console.print(Text(
-                "  ↑↓ pilih · Enter putar · a tambah queue · / cari lagi · Esc kembali",
-                style="dim",
-            ))
-
-            key = _getch(0.5)
-            if key is None:
-                continue
-            if key == "\x1b":
-                return
-            elif key == "\x1b[A":
-                cursor = max(0, cursor - 1)
-            elif key == "\x1b[B":
-                cursor = min(len(items) - 1, cursor + 1)
-            elif key in ("\r", "\n"):
-                track = items[cursor]
-                if not any(t["video_id"] == track.video_id for t in self.state.queue):
-                    self.state.add_to_queue(track)
-                self.state.current_index = next(
-                    i for i, t in enumerate(self.state.queue) if t["video_id"] == track.video_id
-                )
-                console.clear()
                 console.print(self._header())
-                console.print(f"\n  [green]Memuat: {track.title[:50]}...[/green]")
-                ok = self._fetch_and_play(self.state.current_track())
-                if ok:
-                    self._page_player()
-                return
-            elif key in ("a", "A"):
-                track = items[cursor]
-                if any(t["video_id"] == track.video_id for t in self.state.queue):
-                    msg = "[yellow]Sudah ada di queue.[/yellow]"
-                else:
-                    self.state.add_to_queue(track)
-                    self.state.save()
-                    msg = f"[green]+ Ditambah ke queue:[/green] {track.title[:40]}"
-            elif key == "/":
-                return self._page_search()
-            elif key == "\x03":
-                raise KeyboardInterrupt
+                try:
+                    query = self._session.prompt("  Kata kunci: ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    return
+                if not query:
+                    return
 
-    # ── Page: Player (Now Playing) ────────────────────────────────────────────
+            console.print(f"\n  [yellow]Mencari: {query}...[/yellow]")
+            try:
+                self._search_results = search(query)
+            except Exception as e:
+                console.print(f"  [red]Error: {e}[/red]")
+                return
+
+            if not self._search_results:
+                console.print("  [red]Tidak ada hasil.[/red]")
+                return
+
+            # Navigasi interaktif — _page_mode matikan echo selama render
+            cursor = 0
+            items = self._search_results
+            msg = ""
+            do_new_search = False
+
+            with _page_mode():
+                while True:
+                    self._consume_auto_next()
+                    console.clear()
+                    console.print(self._header())
+                    s = self._mini_status()
+                    if s:
+                        console.print(s)
+
+                    tbl = Table(
+                        title=f'🔍 "{query}"',
+                        border_style="cyan", show_lines=False, expand=False,
+                    )
+                    tbl.add_column("", width=2)
+                    tbl.add_column("#", style="dim", width=3)
+                    tbl.add_column("Judul", max_width=50)
+                    tbl.add_column("Channel", style="dim", max_width=22)
+                    tbl.add_column("Durasi", style="cyan", width=8)
+                    for i, tr in enumerate(items):
+                        sel = i == cursor
+                        tbl.add_row(
+                            "[bold green]>[/bold green]" if sel else " ",
+                            str(i + 1),
+                            Text(tr.title[:50], style="bold green" if sel else ""),
+                            Text(tr.channel[:22], style="cyan" if sel else "dim"),
+                            tr.duration,
+                        )
+                    console.print(tbl)
+
+                    if msg:
+                        console.print(f"  {msg}")
+                        msg = ""
+                    console.print(Text(
+                        "  ↑↓ pilih · Enter putar · a tambah queue · / cari lagi · Esc kembali",
+                        style="dim",
+                    ))
+
+                    key = _read_key(0.5)
+                    if key is None:
+                        continue
+                    elif key == "\x1b":
+                        return
+                    elif key == "\x1b[A":
+                        cursor = max(0, cursor - 1)
+                    elif key == "\x1b[B":
+                        cursor = min(len(items) - 1, cursor + 1)
+                    elif key in ("\r", "\n"):
+                        track = items[cursor]
+                        if not any(q["video_id"] == track.video_id for q in self.state.queue):
+                            self.state.add_to_queue(track)
+                        self.state.current_index = next(
+                            idx for idx, q in enumerate(self.state.queue)
+                            if q["video_id"] == track.video_id
+                        )
+                        console.clear()
+                        console.print(self._header())
+                        console.print(f"\n  [green]Memuat: {track.title[:50]}...[/green]")
+                        self._fetch_and_play(self.state.current_track())
+                        return
+                    elif key in ("a", "A"):
+                        track = items[cursor]
+                        if any(q["video_id"] == track.video_id for q in self.state.queue):
+                            msg = "[yellow]Sudah ada di queue.[/yellow]"
+                        else:
+                            self.state.add_to_queue(track)
+                            self.state.save()
+                            msg = f"[green]+ Ditambah:[/green] {track.title[:40]}"
+                    elif key == "/":
+                        do_new_search = True
+                        break
+                    elif key == "\x03":
+                        raise KeyboardInterrupt
+
+            if not do_new_search:
+                return
+            query = ""  # reset → outer loop kembali ke input prompt
 
     def _page_player(self) -> None:
-        while True:
-            if self._auto_next_flag.is_set():
-                self._auto_next_flag.clear()
-                nxt = self.state.current_track()
-                if nxt:
-                    console.clear()
-                    console.print(self._header())
-                    console.print(f"\n  [yellow]⏳ Memuat berikutnya: {nxt['title'][:40]}...[/yellow]")
-                    self._fetch_and_play(nxt)
-                else:
-                    break
+        track = self.state.current_track()
+        if not track:
+            console.print("  [dim]Tidak ada yang diputar.[/dim]")
+            return
 
-            track = self.state.current_track()
-            console.clear()
-            console.print(self._header())
+        liked = is_liked(track["video_id"])
+        heart = "  [red]♥[/red]" if liked else ""
+        if self.player.is_paused:
+            status = "[yellow]⏸  Pause[/yellow]"
+        elif self.player.is_playing:
+            status = "[green]▶  Memutar[/green]"
+        else:
+            status = "[dim]⏹  Berhenti[/dim]"
 
-            if not track:
-                console.print("\n  [dim]Tidak ada yang diputar.[/dim]")
-                console.print("\n  [dim]Esc kembali[/dim]")
-                key = _getch(3.0)
-                return
-
-            # Status
-            liked = is_liked(track["video_id"])
-            heart = "  [red]♥[/red]" if liked else ""
-            if self.player.is_paused:
-                status = "[yellow]⏸  Pause[/yellow]"
-            elif self.player.is_playing:
-                status = "[green]▶  Memutar[/green]"
-            else:
-                status = "[dim]⏹  Berhenti[/dim]"
-
-            console.print(Panel(
-                f"{status}{heart}\n\n"
-                f"[bold white]{track['title']}[/bold white]\n"
-                f"[dim]{track['channel']}[/dim]\n\n"
-                f"{self._progress_bar()}\n\n"
-                f"[dim]🔊 {self.state.volume}%[/dim]",
-                title="[bold]Now Playing[/bold]",
-                border_style="green",
-            ))
-
-            # Queue window
-            ci = self.state.current_index
-            if self.state.queue:
-                start = max(0, ci - 2)
-                end = min(len(self.state.queue), ci + 5)
-                t = Table(border_style="blue", show_lines=False, expand=False, show_header=False)
-                t.add_column("", width=2)
-                t.add_column("#", style="dim", width=4)
-                t.add_column("Judul", max_width=48)
-                t.add_column("Durasi", style="dim", width=8)
-                for i in range(start, end):
-                    tr = self.state.queue[i]
-                    playing = i == ci
-                    t.add_row(
-                        "[green]▶[/green]" if playing else " ",
-                        str(i + 1),
-                        Text(tr["title"][:48], style="bold green" if playing else ("dim" if i < ci else "")),
-                        tr["duration"],
-                    )
-                console.print(Panel(t, title=f"[dim]Queue {ci+1}/{len(self.state.queue)}[/dim]", border_style="blue"))
-
-            console.print(Text(
-                "  [Spasi] pause  [←→] prev/next  [+/-] vol  [l] suka  [Esc] kembali",
-                style="dim",
-            ))
-
-            key = _getch(0.4)
-            if key is None:
-                continue
-            if key == " ":
-                paused = self.player.toggle_pause()
-                if paused:
-                    self.state.position_seconds = self.player.position
-                    self.state.save()
-            elif key in ("n", "N", "\x1b[C"):
-                self.state.position_seconds = 0
-                nxt = self.state.next_track()
-                if nxt:
-                    console.clear()
-                    console.print(self._header())
-                    console.print(f"\n  [yellow]⏳ Memuat: {nxt['title'][:40]}...[/yellow]")
-                    self._fetch_and_play(nxt)
-            elif key in ("p", "P", "\x1b[D"):
-                self.state.position_seconds = 0
-                prv = self.state.prev_track()
-                if prv:
-                    console.clear()
-                    console.print(self._header())
-                    console.print(f"\n  [yellow]⏳ Memuat: {prv['title'][:40]}...[/yellow]")
-                    self._fetch_and_play(prv)
-            elif key in ("+", "="):
-                self.state.volume = min(100, self.state.volume + 10)
-                self.state.save()
-                if track and (self.player.is_playing or self.player.is_paused):
-                    pos = self.player.position
-                    self._fetch_and_play(track, resume_pos=pos)
-            elif key == "-":
-                self.state.volume = max(0, self.state.volume - 10)
-                self.state.save()
-                if track and (self.player.is_playing or self.player.is_paused):
-                    pos = self.player.position
-                    self._fetch_and_play(track, resume_pos=pos)
-            elif key in ("l", "L"):
-                if track:
-                    toggle_like(track["video_id"])
-            elif key in ("\x1b", "q", "Q"):
-                break
-            elif key == "\x03":
-                raise KeyboardInterrupt
-
-    # ── Page: Queue ──────────────────────────────────────────────────────────
+        console.print(Panel(
+            f"{status}{heart}\n\n"
+            f"[bold white]{track['title']}[/bold white]\n"
+            f"[dim]{track['channel']}[/dim]\n\n"
+            f"{self._progress_bar()}\n\n"
+            f"[dim]🔊 {self.state.volume}%   "
+            f"Queue: {self.state.current_index + 1}/{len(self.state.queue)}[/dim]",
+            title="[bold]Now Playing[/bold]",
+            border_style="green",
+        ))
 
     def _page_queue(self) -> None:
         if not self.state.queue:
-            console.clear()
-            console.print(self._header())
-            console.print("\n  [dim]Queue kosong. Gunakan /search untuk mencari ceramah.[/dim]")
-            console.print("\n  [dim]Esc kembali[/dim]")
-            _getch(3.0)
+            console.print("  [dim]Queue kosong.[/dim]")
             return
 
-        cursor = max(0, self.state.current_index)
-        msg = ""
-        VISIBLE = 12
-
-        while True:
-            if not self.state.queue:
-                return
-            self._consume_auto_next()
-            cursor = min(cursor, len(self.state.queue) - 1)
-
-            # Viewport
-            start = max(0, cursor - VISIBLE // 2)
-            end = min(len(self.state.queue), start + VISIBLE)
-            start = max(0, end - VISIBLE)
-
-            console.clear()
-            console.print(self._header())
-            status = self._mini_status()
-            if status:
-                console.print(status)
-
-            ci = self.state.current_index
-            t = Table(
-                title=f"📋 Queue ({len(self.state.queue)} track)",
-                border_style="blue", show_lines=False, expand=False,
+        ci = self.state.current_index
+        t = Table(
+            title=f"📋 Queue ({len(self.state.queue)} track)",
+            border_style="blue", show_lines=False, expand=False,
+        )
+        t.add_column("", width=2)
+        t.add_column("#", style="dim", width=3)
+        t.add_column("Judul", max_width=48)
+        t.add_column("Channel", style="dim", max_width=20)
+        t.add_column("Durasi", style="cyan", width=8)
+        for i, tr in enumerate(self.state.queue):
+            playing = i == ci
+            t.add_row(
+                "[green]▶[/green]" if playing else " ",
+                str(i + 1),
+                Text(tr["title"][:48], style="bold green" if playing else ""),
+                tr["channel"][:20],
+                tr["duration"],
             )
-            t.add_column("", width=2)
-            t.add_column("", width=2)
-            t.add_column("#", style="dim", width=4)
-            t.add_column("Judul", max_width=46)
-            t.add_column("Channel", style="dim", max_width=20)
-            t.add_column("Durasi", style="cyan", width=8)
+        console.print(t)
 
-            for i in range(start, end):
-                tr = self.state.queue[i]
-                sel = i == cursor
-                playing = i == ci
-                arrow = "[bold cyan]>[/bold cyan]" if sel else " "
-                play_mark = "[green]▶[/green]" if playing else " "
-                if sel:
-                    style = "bold cyan"
-                elif playing:
-                    style = "bold green"
-                else:
-                    style = ""
-                t.add_row(
-                    arrow, play_mark, str(i + 1),
-                    Text(tr["title"][:46], style=style),
-                    tr["channel"][:20],
-                    tr["duration"],
-                )
-            console.print(t)
+        try:
+            raw = self._session.prompt(
+                "  Pilih nomor putar, d<nomor> hapus, c kosongkan (Enter batal): "
+            ).strip()
+        except (EOFError, KeyboardInterrupt):
+            return
 
-            if msg:
-                console.print(f"  {msg}")
-                msg = ""
-            console.print(Text(
-                "  ↑↓ pilih · Enter putar · d hapus · c kosongkan · Esc kembali",
-                style="dim",
-            ))
+        if not raw:
+            return
 
-            key = _getch(0.5)
-            if key is None:
-                continue
-            if key == "\x1b":
-                return
-            elif key == "\x1b[A":
-                cursor = max(0, cursor - 1)
-            elif key == "\x1b[B":
-                cursor = min(len(self.state.queue) - 1, cursor + 1)
-            elif key in ("\r", "\n"):
-                self.state.current_index = cursor
-                self.state.position_seconds = 0
-                console.clear()
-                console.print(self._header())
-                console.print(f"\n  [green]Memuat: {self.state.queue[cursor]['title'][:40]}...[/green]")
-                ok = self._fetch_and_play(self.state.current_track())
-                if ok:
-                    self._page_player()
-                return
-            elif key in ("d", "D"):
-                if cursor == self.state.current_index:
+        if raw.lower() == "c":
+            self.player.stop()
+            self.state.clear_queue()
+            console.print("  [red]Queue dikosongkan.[/red]")
+            return
+
+        if raw.lower().startswith("d"):
+            num_str = raw[1:].strip()
+            if num_str.isdigit():
+                idx = int(num_str) - 1
+                if idx == self.state.current_index:
                     self.player.stop()
-                title = self.state.remove_from_queue(cursor)
+                title = self.state.remove_from_queue(idx)
                 if title:
-                    msg = f"[red]- Dihapus:[/red] {title[:40]}"
-            elif key in ("c", "C"):
-                self.player.stop()
-                self.state.clear_queue()
-                msg = "[red]Queue dikosongkan.[/red]"
-                return
-            elif key == "\x03":
-                raise KeyboardInterrupt
+                    console.print(f"  [red]- Dihapus:[/red] {title[:50]}")
+            return
 
-    # ── Page: Likes ──────────────────────────────────────────────────────────
+        if raw.isdigit():
+            idx = int(raw) - 1
+            if 0 <= idx < len(self.state.queue):
+                self.state.current_index = idx
+                self.state.position_seconds = 0
+                console.print(f"  [green]Memuat: {self.state.queue[idx]['title'][:50]}...[/green]")
+                self._fetch_and_play(self.state.current_track())
 
     def _page_likes(self) -> None:
         rows = get_likes()
         if not rows:
-            console.clear()
-            console.print(self._header())
-            console.print("\n  [dim]Belum ada ceramah yang di-like.[/dim]")
-            console.print("\n  [dim]Esc kembali[/dim]")
-            _getch(3.0)
+            console.print("  [dim]Belum ada ceramah yang di-like.[/dim]")
             return
 
-        self._search_results = [
-            Track(title=r["title"], url=r["url"], video_id=r["video_id"],
-                  duration=r["duration"], channel=r["channel"])
-            for r in rows
-        ]
-        cursor = 0
-        items = self._search_results
-        msg = ""
+        t = Table(title="♥ Likes", border_style="red", show_lines=False, expand=False)
+        t.add_column("#", style="dim", width=3)
+        t.add_column("Judul", max_width=50)
+        t.add_column("Channel", style="dim", max_width=22)
+        t.add_column("Durasi", style="cyan", width=8)
+        for i, r in enumerate(rows):
+            t.add_row(str(i + 1), r["title"][:50], r["channel"][:22], r["duration"])
+        console.print(t)
 
-        while True:
-            self._consume_auto_next()
-            console.clear()
-            console.print(self._header())
-            status = self._mini_status()
-            if status:
-                console.print(status)
+        try:
+            raw = self._session.prompt(
+                "  Pilih nomor putar, a<nomor> tambah queue (Enter batal): "
+            ).strip()
+        except (EOFError, KeyboardInterrupt):
+            return
 
-            t = Table(title="♥ Likes", border_style="red", show_lines=False, expand=False)
-            t.add_column("", width=2)
-            t.add_column("#", style="dim", width=3)
-            t.add_column("Judul", max_width=50)
-            t.add_column("Channel", style="dim", max_width=22)
-            t.add_column("Durasi", style="cyan", width=8)
+        if not raw:
+            return
 
-            for i, tr in enumerate(items):
-                sel = i == cursor
-                t.add_row(
-                    "[bold red]>[/bold red]" if sel else " ",
-                    str(i + 1),
-                    Text(tr.title[:50], style="bold" if sel else ""),
-                    Text(tr.channel[:22], style="red" if sel else "dim"),
-                    tr.duration,
-                )
-            console.print(t)
+        if raw.lower().startswith("a"):
+            num_str = raw[1:].strip()
+            if num_str.isdigit():
+                idx = int(num_str) - 1
+                if 0 <= idx < len(rows):
+                    r = rows[idx]
+                    track = Track(title=r["title"], url=r["url"], video_id=r["video_id"],
+                                  duration=r["duration"], channel=r["channel"])
+                    if any(q["video_id"] == track.video_id for q in self.state.queue):
+                        console.print("  [yellow]Sudah ada di queue.[/yellow]")
+                    else:
+                        self.state.add_to_queue(track)
+                        self.state.save()
+                        console.print(f"  [green]+ Ditambah ke queue[/green]")
+            return
 
-            if msg:
-                console.print(f"  {msg}")
-                msg = ""
-            console.print(Text(
-                "  ↑↓ pilih · Enter putar · a tambah queue · Esc kembali",
-                style="dim",
-            ))
-
-            key = _getch(0.5)
-            if key is None:
-                continue
-            if key == "\x1b":
-                return
-            elif key == "\x1b[A":
-                cursor = max(0, cursor - 1)
-            elif key == "\x1b[B":
-                cursor = min(len(items) - 1, cursor + 1)
-            elif key in ("\r", "\n"):
-                track = items[cursor]
-                if not any(t["video_id"] == track.video_id for t in self.state.queue):
+        if raw.isdigit():
+            idx = int(raw) - 1
+            if 0 <= idx < len(rows):
+                r = rows[idx]
+                track = Track(title=r["title"], url=r["url"], video_id=r["video_id"],
+                              duration=r["duration"], channel=r["channel"])
+                if not any(q["video_id"] == track.video_id for q in self.state.queue):
                     self.state.add_to_queue(track)
                 self.state.current_index = next(
-                    i for i, t in enumerate(self.state.queue) if t["video_id"] == track.video_id
+                    i for i, q in enumerate(self.state.queue) if q["video_id"] == track.video_id
                 )
-                console.clear()
-                console.print(self._header())
-                console.print(f"\n  [green]Memuat: {track.title[:40]}...[/green]")
-                ok = self._fetch_and_play(self.state.current_track())
-                if ok:
-                    self._page_player()
-                return
-            elif key in ("a", "A"):
-                track = items[cursor]
-                if any(t["video_id"] == track.video_id for t in self.state.queue):
-                    msg = "[yellow]Sudah ada di queue.[/yellow]"
-                else:
-                    self.state.add_to_queue(track)
-                    self.state.save()
-                    msg = f"[green]+ Ditambah ke queue[/green]"
-            elif key == "\x03":
-                raise KeyboardInterrupt
-
-    # ── Page: History ─────────────────────────────────────────────────────────
+                console.print(f"  [green]Memuat: {track.title[:50]}...[/green]")
+                self._fetch_and_play(self.state.current_track())
 
     def _page_history(self) -> None:
         rows = get_history()
         if not rows:
-            console.clear()
-            console.print(self._header())
-            console.print("\n  [dim]Belum ada riwayat.[/dim]")
-            console.print("\n  [dim]Esc kembali[/dim]")
-            _getch(3.0)
+            console.print("  [dim]Belum ada riwayat.[/dim]")
             return
 
-        cursor = 0
-        while True:
-            self._consume_auto_next()
-            console.clear()
-            console.print(self._header())
-
-            t = Table(title="🕐 Riwayat", border_style="yellow", show_lines=False, expand=False)
-            t.add_column("", width=2)
-            t.add_column("Judul", max_width=46)
-            t.add_column("Channel", style="dim", max_width=20)
-            t.add_column("Waktu", style="dim", width=17)
-
-            for i, r in enumerate(rows):
-                sel = i == cursor
-                t.add_row(
-                    "[bold yellow]>[/bold yellow]" if sel else " ",
-                    Text(r["title"][:46], style="bold" if sel else ""),
-                    r["channel"][:20],
-                    r["played_at"],
-                )
-            console.print(t)
-            console.print(Text("  ↑↓ scroll · Esc kembali", style="dim"))
-
-            key = _getch(30.0)
-            if key is None or key == "\x1b":
-                return
-            elif key == "\x1b[A":
-                cursor = max(0, cursor - 1)
-            elif key == "\x1b[B":
-                cursor = min(len(rows) - 1, cursor + 1)
-            elif key == "\x03":
-                raise KeyboardInterrupt
-
-    # ── Page: Playlists ──────────────────────────────────────────────────────
+        t = Table(title="🕐 Riwayat", border_style="yellow", show_lines=False, expand=False)
+        t.add_column("#", style="dim", width=3)
+        t.add_column("Judul", max_width=46)
+        t.add_column("Channel", style="dim", max_width=20)
+        t.add_column("Waktu", style="dim", width=17)
+        for i, r in enumerate(rows):
+            t.add_row(str(i + 1), r["title"][:46], r["channel"][:20], r["played_at"])
+        console.print(t)
 
     def _page_playlists(self) -> None:
-        while True:
-            rows = get_playlists()
-            if not rows:
-                console.clear()
-                console.print(self._header())
-                console.print("\n  [dim]Belum ada playlist.[/dim]")
-                console.print("\n  [dim]n buat baru · Esc kembali[/dim]")
-                key = _getch(30.0)
-                if key == "n":
-                    self._playlist_create()
-                    continue
-                return
+        rows = get_playlists()
+        if not rows:
+            console.print("  [dim]Belum ada playlist. Gunakan /playlist new <nama>[/dim]")
+            return
 
-            cursor = 0
-            while True:
-                self._consume_auto_next()
-                console.clear()
-                console.print(self._header())
+        t = Table(title="📂 Playlist", border_style="blue", show_lines=False, expand=False)
+        t.add_column("#", style="dim", width=3)
+        t.add_column("Nama", style="bold cyan", max_width=28)
+        t.add_column("Track", style="dim", width=6)
+        t.add_column("Dibuat", style="dim", width=17)
+        for i, r in enumerate(rows):
+            t.add_row(str(i + 1), r["name"][:28], str(r["track_count"]), r["created_at"])
+        console.print(t)
 
-                t = Table(title="📂 Playlist", border_style="blue", show_lines=False, expand=False)
-                t.add_column("", width=2)
-                t.add_column("Nama", style="bold cyan", max_width=28)
-                t.add_column("Track", style="dim", width=6)
-                t.add_column("Dibuat", style="dim", width=17)
+        try:
+            raw = self._session.prompt(
+                "  Pilih nomor lihat, p<nomor> putar, d<nomor> hapus (Enter batal): "
+            ).strip()
+        except (EOFError, KeyboardInterrupt):
+            return
 
-                for i, r in enumerate(rows):
-                    sel = i == cursor
-                    t.add_row(
-                        "[bold cyan]>[/bold cyan]" if sel else " ",
-                        Text(r["name"][:28], style="bold" if sel else ""),
-                        str(r["track_count"]),
-                        r["created_at"],
-                    )
-                console.print(t)
-                console.print(Text(
-                    "  ↑↓ pilih · Enter lihat · p putar · n buat baru · d hapus · Esc kembali",
-                    style="dim",
-                ))
+        if not raw:
+            return
 
-                key = _getch(30.0)
-                if key is None:
-                    continue
-                if key == "\x1b":
-                    return
-                elif key == "\x1b[A":
-                    cursor = max(0, cursor - 1)
-                elif key == "\x1b[B":
-                    cursor = min(len(rows) - 1, cursor + 1)
-                elif key in ("\r", "\n"):
-                    self._page_playlist_detail(rows[cursor]["name"])
-                    break  # re-fetch playlists
-                elif key in ("p", "P"):
-                    self._playlist_play(rows[cursor]["name"])
-                    return
-                elif key == "n":
-                    self._playlist_create()
-                    break
-                elif key in ("d", "D"):
-                    name = rows[cursor]["name"]
+        if raw.lower().startswith("p"):
+            num_str = raw[1:].strip()
+            if num_str.isdigit():
+                idx = int(num_str) - 1
+                if 0 <= idx < len(rows):
+                    self._playlist_play(rows[idx]["name"])
+            return
+
+        if raw.lower().startswith("d"):
+            num_str = raw[1:].strip()
+            if num_str.isdigit():
+                idx = int(num_str) - 1
+                if 0 <= idx < len(rows):
+                    name = rows[idx]["name"]
                     delete_playlist(name)
-                    break
-                elif key == "\x03":
-                    raise KeyboardInterrupt
+                    console.print(f"  [red]- Dihapus: {name}[/red]")
+            return
+
+        if raw.isdigit():
+            idx = int(raw) - 1
+            if 0 <= idx < len(rows):
+                self._page_playlist_detail(rows[idx]["name"])
 
     def _page_playlist_detail(self, name: str) -> None:
         tracks = get_playlist_tracks(name)
         if not tracks:
+            console.print(f"  [dim]Playlist '{name}' kosong.[/dim]")
             return
-        cursor = 0
-        msg = ""
 
-        while True:
-            console.clear()
-            console.print(self._header())
+        t = Table(title=f"📂 {name}", border_style="blue", show_lines=False, expand=False)
+        t.add_column("#", style="dim", width=3)
+        t.add_column("Judul", max_width=50)
+        t.add_column("Channel", style="dim", max_width=20)
+        t.add_column("Durasi", style="cyan", width=8)
+        for i, r in enumerate(tracks):
+            t.add_row(str(i + 1), r["title"][:50], r["channel"][:20], r["duration"])
+        console.print(t)
 
-            t = Table(title=f"📂 {name}", border_style="blue", show_lines=False, expand=False)
-            t.add_column("", width=2)
-            t.add_column("#", style="dim", width=3)
-            t.add_column("Judul", max_width=48)
-            t.add_column("Channel", style="dim", max_width=20)
-            t.add_column("Durasi", style="cyan", width=8)
-
-            for i, r in enumerate(tracks):
-                sel = i == cursor
-                t.add_row(
-                    "[bold blue]>[/bold blue]" if sel else " ",
-                    str(i + 1),
-                    Text(r["title"][:48], style="bold" if sel else ""),
-                    r["channel"][:20],
-                    r["duration"],
-                )
-            console.print(t)
-
-            if msg:
-                console.print(f"  {msg}")
-                msg = ""
-            console.print(Text(
-                "  ↑↓ pilih · Enter putar semua · a tambah now playing · Esc kembali",
-                style="dim",
-            ))
-
-            key = _getch(30.0)
-            if key is None:
-                continue
-            if key == "\x1b":
-                return
-            elif key == "\x1b[A":
-                cursor = max(0, cursor - 1)
-            elif key == "\x1b[B":
-                cursor = min(len(tracks) - 1, cursor + 1)
-            elif key in ("\r", "\n"):
-                self._playlist_play(name)
-                return
-            elif key in ("a", "A"):
-                track = self.state.current_track()
-                if track:
-                    upsert_track(track)
-                    if add_to_playlist(name, track):
-                        msg = f"[green]+ Ditambah ke '{name}'[/green]"
-                        tracks = get_playlist_tracks(name)
-                    else:
-                        msg = "[yellow]Sudah ada di playlist.[/yellow]"
-                else:
-                    msg = "[yellow]Tidak ada track yang diputar.[/yellow]"
-            elif key == "\x03":
-                raise KeyboardInterrupt
-
-    def _playlist_create(self) -> None:
-        console.clear()
-        console.print(self._header())
-        console.print("\n  [bold cyan]📂 Buat Playlist Baru[/bold cyan]\n")
         try:
-            name = self._session.prompt("  Nama: ").strip()
+            raw = self._session.prompt(
+                "  Enter putar semua, a tambah now playing ke sini (batal Enter): "
+            ).strip()
         except (EOFError, KeyboardInterrupt):
             return
+
+        if not raw:
+            return
+
+        if raw.lower() == "a":
+            track = self.state.current_track()
+            if track:
+                upsert_track(track)
+                if add_to_playlist(name, track):
+                    console.print(f"  [green]+ Ditambah ke '{name}'[/green]")
+                else:
+                    console.print("  [yellow]Sudah ada di playlist.[/yellow]")
+            else:
+                console.print("  [yellow]Tidak ada track yang diputar.[/yellow]")
+        elif raw.lower() in ("p", "play", "putar", ""):
+            self._playlist_play(name)
+
+    def _playlist_create(self, name: str = "") -> None:
+        if not name:
+            try:
+                name = self._session.prompt("  Nama playlist: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                return
         if name:
             if create_playlist(name):
-                console.print(f"\n  [green]+ Playlist dibuat: {name}[/green]")
+                console.print(f"  [green]+ Playlist dibuat: {name}[/green]")
             else:
-                console.print(f"\n  [yellow]Playlist '{name}' sudah ada.[/yellow]")
-            _getch(1.5)
+                console.print(f"  [yellow]Playlist '{name}' sudah ada.[/yellow]")
 
     def _playlist_play(self, name: str) -> None:
         tracks = get_playlist_tracks(name)
         if not tracks:
+            console.print(f"  [yellow]Playlist '{name}' kosong.[/yellow]")
             return
         self.player.stop()
         self.state.clear_queue()
@@ -837,49 +596,42 @@ class NgajiApp:
                 duration=r["duration"], channel=r["channel"]
             ))
         self.state.current_index = 0
-        console.clear()
-        console.print(self._header())
-        console.print(f"\n  [green]▶ Memuat playlist '{name}' ({len(tracks)} track)...[/green]")
-        ok = self._fetch_and_play(self.state.current_track())
-        if ok:
-            self._page_player()
+        console.print(f"  [green]▶ Memuat playlist '{name}' ({len(tracks)} track)...[/green]")
+        self._fetch_and_play(self.state.current_track())
 
-    # ── Page: Help ────────────────────────────────────────────────────────────
+    # ── Help ─────────────────────────────────────────────────────────────────
 
     def _page_help(self) -> None:
-        console.clear()
-        console.print(self._header())
-
         t = Table(title="📖 Perintah", border_style="magenta", show_header=False, expand=False)
         t.add_column("Perintah", style="bold cyan", width=22)
         t.add_column("Fungsi")
         rows = [
-            ("/search",     "Cari ceramah di YouTube"),
-            ("/np",         "Now playing — layar player interaktif"),
-            ("/queue",      "Lihat & kelola antrian"),
-            ("/likes",      "Daftar ceramah yang di-like"),
-            ("/history",    "Riwayat ceramah terakhir"),
-            ("/playlists",  "Lihat & kelola playlist"),
-            ("──────",      ""),
-            ("/pause",      "Pause / Resume"),
-            ("/next",       "Track berikutnya"),
-            ("/prev",       "Track sebelumnya"),
-            ("/volume N",   "Atur volume (0-100)"),
-            ("/vol+  /vol-","Volume naik/turun 10"),
-            ("/like",       "Like / unlike track sekarang"),
-            ("──────",      ""),
-            ("/help",       "Halaman ini"),
-            ("/quit",       "Keluar (posisi tersimpan otomatis)"),
+            ("/search [kata]",  "Cari ceramah di YouTube"),
+            ("/np",             "Status track sekarang"),
+            ("/queue",          "Lihat & kelola antrian"),
+            ("/likes",          "Daftar ceramah yang di-like"),
+            ("/history",        "Riwayat ceramah terakhir"),
+            ("/playlists",      "Lihat & kelola playlist"),
+            ("──────",          ""),
+            ("/pause",          "Pause / Resume"),
+            ("/next",           "Track berikutnya"),
+            ("/prev",           "Track sebelumnya"),
+            ("/volume N",       "Atur volume (0-100)"),
+            ("/vol+  /vol-",    "Volume naik/turun 10"),
+            ("/like",           "Like / unlike track sekarang"),
+            ("──────",          ""),
+            ("/playlist new N", "Buat playlist baru"),
+            ("/playlist add N", "Tambah track ke playlist"),
+            ("/playlist play N","Putar playlist"),
+            ("/playlist del N", "Hapus playlist"),
+            ("──────",          ""),
+            ("/help",           "Halaman ini"),
+            ("/quit",           "Keluar"),
         ]
         for cmd, desc in rows:
             t.add_row(cmd, desc)
         console.print(t)
-
-        console.print("\n  [dim]Ketik [bold]/[/bold] di prompt untuk autocomplete perintah[/dim]")
-        console.print("  [dim]Di dalam halaman: [bold]Esc[/bold] untuk kembali[/dim]")
-        console.print("\n  [dim]Tekan tombol apa saja untuk kembali...[/dim]")
-
-        _getch(60.0)
+        console.print("  [dim]Ketik [bold]/[/bold] untuk autocomplete[/dim]")
 
     # ── Command dispatch ──────────────────────────────────────────────────────
 
@@ -892,7 +644,6 @@ class NgajiApp:
         cmd = parts[0].lower()
         arg = parts[1] if len(parts) > 1 else ""
 
-        # Pages
         if cmd == "search":
             self._page_search(arg)
         elif cmd in ("np", "player", "status"):
@@ -913,14 +664,8 @@ class NgajiApp:
             sub_parts = arg.split(maxsplit=1)
             sub = sub_parts[0].lower()
             name = sub_parts[1].strip() if len(sub_parts) > 1 else ""
-            if sub == "new":
-                if name:
-                    if create_playlist(name):
-                        console.print(f"  [green]+ Playlist dibuat: {name}[/green]")
-                    else:
-                        console.print(f"  [yellow]Sudah ada.[/yellow]")
-                else:
-                    self._playlist_create()
+            if sub in ("new", "baru"):
+                self._playlist_create(name)
             elif sub == "add" and name:
                 track = self.state.current_track()
                 if track:
@@ -931,15 +676,14 @@ class NgajiApp:
                         console.print(f"  [yellow]Gagal/sudah ada.[/yellow]")
                 else:
                     console.print("  [yellow]Tidak ada track yang diputar.[/yellow]")
-            elif sub == "play" and name:
+            elif sub in ("play", "putar") and name:
                 self._playlist_play(name)
-            elif sub == "show" and name:
+            elif sub in ("show", "lihat") and name:
                 self._page_playlist_detail(name)
-            elif sub == "delete" and name:
+            elif sub in ("delete", "del", "hapus") and name:
                 if delete_playlist(name):
                     console.print(f"  [red]- Dihapus: {name}[/red]")
 
-        # Instant actions
         elif cmd == "pause":
             paused = self.player.toggle_pause()
             if paused:
@@ -953,10 +697,8 @@ class NgajiApp:
             self.state.position_seconds = 0
             nxt = self.state.next_track()
             if nxt:
-                console.print(f"  [green]Memuat: {nxt['title'][:40]}...[/green]")
-                ok = self._fetch_and_play(nxt)
-                if ok:
-                    self._page_player()
+                console.print(f"  [green]Memuat: {nxt['title'][:50]}...[/green]")
+                self._fetch_and_play(nxt)
             else:
                 console.print("  [yellow]Sudah di akhir queue.[/yellow]")
 
@@ -964,10 +706,8 @@ class NgajiApp:
             self.state.position_seconds = 0
             prv = self.state.prev_track()
             if prv:
-                console.print(f"  [green]Memuat: {prv['title'][:40]}...[/green]")
-                ok = self._fetch_and_play(prv)
-                if ok:
-                    self._page_player()
+                console.print(f"  [green]Memuat: {prv['title'][:50]}...[/green]")
+                self._fetch_and_play(prv)
             else:
                 console.print("  [yellow]Sudah di awal queue.[/yellow]")
 
@@ -1004,14 +744,13 @@ class NgajiApp:
 
         else:
             console.print(
-                f"  [red]Perintah tidak dikenal:[/red] [bold]{cmd}[/bold]\n"
-                "  [dim]Ketik [bold]/[/bold] untuk daftar perintah[/dim]"
+                f"  [red]Perintah tidak dikenal:[/red] [bold]{cmd}[/bold]  "
+                "[dim](ketik /help)[/dim]"
             )
 
     # ── Main loop ─────────────────────────────────────────────────────────────
 
     def run(self) -> None:
-        console.clear()
         console.print(self._header())
 
         # Resume sesi terakhir
@@ -1020,25 +759,22 @@ class NgajiApp:
             pos = self.state.position_seconds
             console.print(
                 f"\n  [dim]Sesi terakhir:[/dim] [bold]{last['title']}[/bold]"
-                f"\n  [dim]@ {_fmt(pos)}[/dim]"
+                f"  [dim]@ {_fmt(pos)}[/dim]"
             )
-            console.print("\n  [dim]Lanjutkan? (y/n)[/dim] ", end="")
-            key = _getch(10.0)
-            if key in ("y", "Y"):
-                console.print("[green]ya[/green]")
-                console.print(f"\n  [green]Memuat...[/green]")
-                ok = self._fetch_and_play(last, resume_pos=pos)
-                if ok:
-                    self._page_player()
+            try:
+                ans = self._session.prompt("  Lanjutkan? (y/n): ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                ans = "n"
+            if ans == "y":
+                console.print(f"  [green]Memuat...[/green]")
+                self._fetch_and_play(last, resume_pos=pos)
             else:
-                console.print("[dim]tidak[/dim]")
                 self.state.position_seconds = 0
                 self.state.save()
 
         while True:
             self._consume_auto_next()
 
-            # Mini status
             status = self._mini_status()
             if status:
                 console.print(status)
