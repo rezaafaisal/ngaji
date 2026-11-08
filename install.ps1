@@ -38,7 +38,13 @@ if (-not (Have "uv")) {
 }
 
 Write-Host "  Memasang ngaji ..." -ForegroundColor Cyan
-uv tool install --upgrade --python 3.12 ngaji
+# Pakai PyPI; kalau belum terbit, ambil langsung dari GitHub
+uv tool install --upgrade --python 3.12 ngaji 2>$null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "  ngaji belum ada di PyPI, memasang dari GitHub ..." -ForegroundColor Cyan
+    uv tool install --force --python 3.12 "ngaji @ https://github.com/rezaafaisal/ngaji/archive/refs/heads/main.zip"
+    if ($LASTEXITCODE -ne 0) { throw "Gagal memasang ngaji" }
+}
 uv tool update-shell 2>$null | Out-Null
 
 Write-Host "`nSelesai! Buka terminal baru lalu jalankan:  ngaji" -ForegroundColor Green

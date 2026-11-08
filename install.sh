@@ -36,7 +36,11 @@ if ! have uv; then
 fi
 
 say "Memasang ngaji ..."
-uv tool install --upgrade --python 3.12 ngaji
+# Pakai PyPI; kalau belum terbit, ambil langsung dari GitHub
+if ! uv tool install --upgrade --python 3.12 ngaji 2>/dev/null; then
+  say "ngaji belum ada di PyPI, memasang dari GitHub ..."
+  uv tool install --force --python 3.12 "ngaji @ https://github.com/rezaafaisal/ngaji/archive/refs/heads/main.zip"
+fi
 uv tool update-shell >/dev/null 2>&1 || true
 
 printf '\n\033[32mSelesai!\033[0m Buka terminal baru lalu jalankan:  ngaji\n'
