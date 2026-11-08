@@ -3,13 +3,17 @@ name: Release
 on:
   push:
     tags:
-      - "v*"   # trigger saat push tag seperti v0.1.0
+      - "v*"   # trigger saat push tag seperti v0.2.0
 
 permissions:
   contents: write
 
 jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
   build-and-publish:
+    needs: test
     runs-on: ubuntu-latest
     environment: release
 
@@ -21,11 +25,16 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install build tools
-        run: pip install hatch
+      - name: Cek tag == versi package
+        run: |
+          VERSION=$(python -c "import re;print(re.search(r'__version__ = \"(.+)\"', open('src/ngaji/__init__.py').read()).group(1))")
+          if [ "v$VERSION" != "${GITHUB_REF_NAME}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} tidak sama dengan versi v$VERSION di src/ngaji/__init__.py"
+            exit 1
+          fi
 
       - name: Build package
-        run: hatch build
+        run: pip install hatch && hatch build
 
       - name: Publish ke PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

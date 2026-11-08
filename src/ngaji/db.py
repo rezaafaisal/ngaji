@@ -11,7 +11,7 @@ DB_FILE = Path.home() / ".ngaji.db"
 
 @contextmanager
 def _conn():
-    con = sqlite3.connect(DB_FILE)
+    con = sqlite3.connect(DB_FILE, timeout=10)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA foreign_keys = ON")
     try:
@@ -84,7 +84,7 @@ def get_history(limit: int = 20) -> list[sqlite3.Row]:
             SELECT t.video_id, t.title, t.channel, t.duration, t.url, h.played_at
             FROM history h
             JOIN tracks t ON t.video_id = h.video_id
-            ORDER BY h.played_at DESC
+            ORDER BY h.id DESC
             LIMIT ?
         """, (limit,)).fetchall()
 
